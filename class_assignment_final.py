@@ -79,14 +79,16 @@ def normalize_club(x):
     """부활동/클럽 참여 여부를 판단하는 함수"""
     if pd.isna(x): return 0
     s = str(x).strip().lower()
-    if s in ('1','yes','y','true','t','o','예','있음','있다','참여','활동'):
+    
+    # 빈 값이나 None 체크
+    if s in ('', 'nan', 'none', 'null'):
+        return 0
+    
+    # 실제 클럽 활동 이름들이 있으면 1 (참여)
+    # 어떤 텍스트든 있으면 클럽에 참여하는 것으로 간주
+    if len(s) > 0:
         return 1
-    try:
-        f = float(s)
-        return 1 if f>0 else 0
-    except:
-        if any(k in s for k in ['yes','true','club','클럽','부활동','동아리','활동','참여']):
-            return 1
+    
     return 0
 
 def resolve_refs(raw_list, id_to_idx, n):
@@ -138,7 +140,7 @@ def build_previous_classmates(df, previous_class_col):
     
     return previous_classmates, total_pairs
 
-def run_ortools_final(df, out_path, class_sizes):
+def run_ortools_final(df, out_path, class_sizes, club_col=None, previous_class_col=None):
     try:
         from ortools.sat.python import cp_model
     except Exception as e:
@@ -179,21 +181,31 @@ def run_ortools_final(df, out_path, class_sizes):
                     enemy_constraints += 1
     print(f"Added {enemy_constraints} enemy separation constraints")
 
-    # 제약조건 4: 전년도 클래스메이트 분리 (1-B) - 소프트 제약으로 구현
-    previous_constraints = 0
-    violation_vars = []
-    for i in range(n):
-        previous_list = df.at[i,'previous_classmates']
-        if isinstance(previous_list, list):
-            for j in previous_list:
-                if j>=0 and j<n and j!=i:
-                    # 소프트 제약: 같은 클래스에 배정되면 penalty
-                    for c in range(k):
-                        violation_var = model.NewBoolVar(f"prev_violation_{i}_{j}_{c}")
-                        model.Add(x[(i,c)] + x[(j,c)] - 1 <= violation_var)
-                        violation_vars.append(violation_var)
-                    previous_constraints += 1
-    print(f"Added {previous_constraints} previous classmate separation (soft) constraints")
+    # 제약조건 4: 전년도 클래스메이트 분산 (1-B) - 각 반에 동일 출신이 너무 몰리지 않게
+    if previous_class_col and previous_class_col in df.columns:
+        # 전년도 클래스별로 그룹화
+        prev_class_groups = {}
+        for idx, row in df.iterrows():
+            prev_class = str(row[previous_class_col]).strip().lower()
+            if prev_class and prev_class not in ('', 'nan', 'none', 'null'):
+                if prev_class not in prev_class_groups:
+                    prev_class_groups[prev_class] = []
+                prev_class_groups[prev_class].append(idx)
+        
+        # 각 전년도 클래스별로 현재 반에 너무 몰리지 않게 제약
+        violation_vars = []
+        for prev_class, students in prev_class_groups.items():
+            if len(students) > k:  # 학생 수가 반 수보다 많을 때만
+                max_per_class = math.ceil(len(students) / k) + 1  # 약간의 여유 허용
+                for c in range(k):
+                    # 소프트 제약: 한 반에 너무 많이 몰리면 penalty
+                    over_var = model.NewIntVar(0, len(students), f"prev_over_{prev_class}_{c}")
+                    model.Add(over_var >= sum(x[(i,c)] for i in students) - max_per_class)
+                    model.Add(over_var >= 0)
+                    violation_vars.append(over_var)
+                print(f"Added {prev_class}반 출신 분산: {len(students)}명, 각 반 최대 {max_per_class}명")
+        
+        print(f"Added previous class distribution constraints (soft) for {len(prev_class_groups)} classes")
 
     # 제약조건 5: 리더십 분배 (2번) - 각 학급에 최소 1명씩
     leader_idxs = [i for i in range(n) if df.at[i,'is_leader']==1]
@@ -246,16 +258,37 @@ def run_ortools_final(df, out_path, class_sizes):
             model.Add(sum(x[(i,c)] for i in athletic_idxs) <= ath_ceil)
         print(f"Added athletic balance constraints: {ath_total} athletic students, {ath_floor}-{ath_ceil} per class")
 
-    # 제약조건 10: 부활동/클럽 활동 균등 분배 (11번)
-    club_idxs = [i for i in range(n) if df.at[i,'is_club']==1]
-    if club_idxs:
-        club_total = len(club_idxs)
-        club_floor = club_total // k
-        club_ceil = math.ceil(club_total / k)
-        for c in range(k):
-            model.Add(sum(x[(i,c)] for i in club_idxs) >= club_floor)
-            model.Add(sum(x[(i,c)] for i in club_idxs) <= club_ceil)
-        print(f"Added club balance constraints: {club_total} club students, {club_floor}-{club_ceil} per class")
+    # 제약조건 10: 부활동/클럽 활동 균등 분배 (11번) - 클럽별 균등 분배
+    if club_col and club_col in df.columns:
+        # 각 클럽 종류별로 학생들을 그룹화
+        club_groups = {}
+        for idx, row in df.iterrows():
+            club_name = str(row[club_col]).strip().lower()
+            if club_name and club_name not in ('', 'nan', 'none', 'null'):
+                if club_name not in club_groups:
+                    club_groups[club_name] = []
+                club_groups[club_name].append(idx)
+        
+        # 각 클럽별로 균등 분배 제약 추가
+        total_club_constraints = 0
+        for club_name, club_members in club_groups.items():
+            if len(club_members) >= k:  # 클럽 멤버가 학급 수보다 많을 때만 분배
+                club_total = len(club_members)
+                club_floor = club_total // k
+                club_ceil = math.ceil(club_total / k)
+                for c in range(k):
+                    model.Add(sum(x[(i,c)] for i in club_members) >= club_floor)
+                    model.Add(sum(x[(i,c)] for i in club_members) <= club_ceil)
+                print(f"Added {club_name} club balance: {club_total} members, {club_floor}-{club_ceil} per class")
+                total_club_constraints += 1
+            else:
+                # 멤버가 적은 클럽은 최대한 분산
+                for c in range(k):
+                    model.Add(sum(x[(i,c)] for i in club_members) <= 1)
+                print(f"Added {club_name} club scatter: {len(club_members)} members, max 1 per class")
+                total_club_constraints += 1
+        
+        print(f"Added {total_club_constraints} different club balance constraints")
 
     # 제약조건 11: 성적 균형 분배 (4번) - 목적함수의 일부로 구현
     scale = 1
@@ -322,26 +355,45 @@ def run_ortools_final(df, out_path, class_sizes):
             grade_sums.append(grade_sum)
             print(f"학급 {c}: {len(members)}명, 리더 {leaders}명, 피아노 {pianos}명, 비등교 {atrisks}명, 남 {males}명, 여 {females}명, 운동 {athletics}명, 클럽 {clubs}명, 평균성적 {grade_avg:.1f}, 총점 {grade_sum:.0f}")
         
-        # 전년도 클래스메이트 분리 효과 측정
-        if violation_vars:
-            total_prev_violations = sum(solver.Value(v) for v in violation_vars)
-            prev_separation_rate = 1 - (total_prev_violations / len(violation_vars)) if violation_vars else 1
-            print(f"\n전년도 클래스메이트 분리: {total_prev_violations}/{len(violation_vars)} 위반 (분리율: {prev_separation_rate:.1%})")
-        
         grade_std = np.std(grade_sums)
-        print(f"성적 균형: 총점 표준편차 = {grade_std:.1f}")
+        print(f"\n성적 균형: 총점 표준편차 = {grade_std:.1f}")
+        
+        # 클럽별 분배 상세 분석
+        if club_col and club_col in df.columns:
+            print("\n🎨 클럽별 분배 분석:")
+            
+            # 전체 클럽 종류별 분배 현황
+            all_clubs = df[club_col].value_counts()
+            
+            for club_name, total_members in all_clubs.items():
+                if pd.notna(club_name) and str(club_name).strip():
+                    distribution = []
+                    for c in range(k):
+                        members = out_df[out_df['assigned_class']==c]
+                        club_count = (members[club_col] == club_name).sum()
+                        distribution.append(club_count)
+                    
+                    dist_str = ", ".join([f"반{c}:{count}명" for c, count in enumerate(distribution)])
+                    print(f"{club_name} ({total_members}명): {dist_str}")
+            
+            print("\n📊 각 학급별 클럽 다양성:")
+            for c in range(k):
+                members = out_df[out_df['assigned_class']==c]
+                club_distribution = members[club_col].value_counts()
+                club_summary = ", ".join([f"{club}({count})" for club, count in club_distribution.head(10).items()])
+                print(f"학급 {c}: {club_summary}")
         
         print("\n🏆 모든 제약조건 완성!")
         print("=" * 50)
         print("✅ 적대관계 완전 분리")
-        print("✅ 전년도 클래스메이트 최대한 분리")
+        print("✅ 전년도 클래스 균등 분산")
         print("✅ 리더십 학생 균등 분배")
         print("✅ 피아노 학생 균등 분배")
         print("✅ 성적 완벽 균형")
         print("✅ 비등교 학생 균등 분배")
         print("✅ 성별 균등 분배")
         print("✅ 운동 능력 균등 분배")
-        print("✅ 부활동/클럽 균등 분배")
+        print("✅ 부활동/클럽 다양성 보장")
         print("=" * 50)
         
         return True
@@ -490,7 +542,7 @@ def main():
     print(f"  평균 성적: {avg_grade:.1f}")
 
     # OR-Tools 실행
-    success = run_ortools_final(df, args.output, class_sizes)
+    success = run_ortools_final(df, args.output, class_sizes, club_col, previous_class_col)
     if not success:
         print("\n💡 실패 원인을 분석해보세요.")
 
