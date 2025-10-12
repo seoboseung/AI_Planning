@@ -441,7 +441,7 @@ def main():
     parser.add_argument('--input', required=False, default='task2.csv', help='input CSV file (default: task2.csv)')
     parser.add_argument('--output', required=False, default='assignment_task2.csv', help='output CSV file (default: assignment_task2.csv)')
     parser.add_argument('--mode', choices=['ortools'], default='ortools', help='solver mode')
-    parser.add_argument('--submission-bonus', type=int, default=2, help='bonus points for submitting extra task (default: 2)')
+        # 추가과제 제출자 옵션 제거
     parser.add_argument('--transfer-weight', type=int, default=5, help='weight for assigning transfers to leader-rich classes (default: 5)')
     args = parser.parse_args()
 
@@ -461,10 +461,10 @@ def main():
     club_col = find_col(cols, ['클럽','club','부활동','동아리','활동','extracurricular'])
     transfer_col = find_col(cols, ['transfer','전학생','is_transfer'])
     sibling_col = find_col(cols, ['sibling','형제자매','형제자매ID','sibling_id','sibling id'])
-    submission_col = find_col(cols, ['submission','submitted','과제제출','task_submitted','제출'])
+        # 추가과제 제출자 관련 컬럼 완전 제거
 
     print("🎯 === Modified for task2.csv: sibling groups + transfer priority + submission bonus ===")
-    print(f"Detected columns: ID={id_col}, enemies={enemies_col}, prev_class={previous_class_col}, leader={leader_col}, piano={piano_col}, grade={grade_col}, at_risk={at_risk_col}, gender={gender_col}, athletic={athletic_col}, club={club_col}, transfer={transfer_col}, sibling={sibling_col}, submission={submission_col}")
+    print(f"Detected columns: ID={id_col}, enemies={enemies_col}, prev_class={previous_class_col}, leader={leader_col}, piano={piano_col}, grade={grade_col}, at_risk={at_risk_col}, gender={gender_col}, athletic={athletic_col}, club={club_col}, transfer={transfer_col}, sibling={sibling_col}")
 
     n = len(df)
     id_to_idx = {}
@@ -570,14 +570,7 @@ def main():
         df['grade_val'] = 0.0
         avg_grade = 0.0
 
-    submission_bonus = args.submission_bonus
-    if submission_col and submission_col in df.columns:
-        df['submitted_task'] = df[submission_col].apply(normalize_bool)
-        df['grade_val'] = df['grade_val'] + df['submitted_task'] * submission_bonus
-        total_submitted = df['submitted_task'].sum()
-    else:
-        df['submitted_task'] = 0
-        total_submitted = 0
+        # 추가과제 제출자 관련 데이터 완전 제거
 
     class_sizes = [100, 100, 100, 100, 100, 100]
 
@@ -590,7 +583,7 @@ def main():
     print(f"  전학생(우선배정) 학생 수: {total_transfers}명")
     print(f"  형제/자매 링크 수: {total_sibling_links}")
     print(f"  형제/자매 그룹 수(2명 이상): {total_sibling_groups}")
-    print(f"  추가과제 제출자(가점): {total_submitted}명")
+        # 추가과제 제출자 관련 출력 제거
     print(f"  피아노 학생: {total_pianos}명")
     print(f"  비등교 학생: {total_atrisks}명")
     print(f"  남학생: {total_males}명, 여학생: {total_females}명")
